@@ -1,20 +1,24 @@
 using Keyper.API.Data;
-using Keyper.API.Models;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Hosting;
-using Npgsql.EntityFrameworkCore.PostgreSQL;
-using Microsoft.Data.SqlClient;
+using Microsoft.AspNetCore.RateLimiting;
+using System.Threading.RateLimiting;
 using System.Security.Cryptography;
+using Npgsql.EntityFrameworkCore.PostgreSQL;
 
 var builder = WebApplication.CreateBuilder(args);
-
-// Get database configuration from environment variables or appsettings
+builder.WebHost.UseUrls("http://0.0.0.0:5000");
+builder.Logging.ClearProviders();
+builder.Logging.AddConsole();
 var dbProvider = builder.Configuration["DatabaseProvider"] ?? "postgresql";
-var connectionString = builder.Configuration.GetConnectionString("DefaultConnection")
-    ?? "Data Source=keyper.db";
-
+var connectionString = builder.Configuration.GetConnectionString("DefaultConnection") ?? "Data Source=keyper.db";
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("AllowAllOrigins", policy =>
+    {
+        policy.AllowAnyOrigin().AllowAnyMethod().AllowAnyHeader();
+    });
+});
 builder.Services.AddDbContext<ApiKeyDbContext>(options =>
 {
     switch (dbProvider.ToLower())
@@ -35,54 +39,36 @@ builder.Services.AddDbContext<ApiKeyDbContext>(options =>
             throw new InvalidOperationException("Unsupported database provider");
     }
 });
-
+builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
-
+builder.Services.AddRateLimiter(options =>
+{
+    options.AddPolicy("default", context =>
+    {
+        var clientIp = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+        return RateLimitPartition.GetFixedWindowLimiter(clientIp, _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = 100,
+            Window = TimeSpan.FromMinutes(1),
+            QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+            QueueLimit = 2
+        });
+    });
+});
 var app = builder.Build();
+
+using (var scope = app.Services.CreateScope())
+{
+    var dbContext = scope.ServiceProvider.GetRequiredService<ApiKeyDbContext>();
+    // TODO: change to migrations
+    dbContext.Database.EnsureCreated();
+}
+
+app.UseRateLimiter();
+app.UseCors("AllowAllOrigins");
 app.UseSwagger();
 app.UseSwaggerUI();
-app.UseHttpsRedirection();
-
-// Generate API Key Endpoint
-app.MapPost("/api/keys/create", async ([FromBody] string name, ApiKeyDbContext db) =>
-{
-    string newKey = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
-    var apiKey = new ApiKey { Name = name, Key = newKey };
-    db.ApiKeys.Add(apiKey);
-    await db.SaveChangesAsync();
-    return Results.Ok(apiKey);
-});
-
-// List API Keys Endpoint
-app.MapGet("/api/keys/list", async (ApiKeyDbContext db) =>
-{
-    var keys = await db.ApiKeys.Where(k => !k.IsRevoked).ToListAsync();
-    return Results.Ok(keys);
-});
-
-// Validate API Key Endpoint
-app.MapPost("/api/keys/validate", async ([FromBody] string key, ApiKeyDbContext db) =>
-{
-    var apiKey = await db.ApiKeys.FirstOrDefaultAsync(k => k.Key == key && !k.IsRevoked);
-    if (apiKey != null)
-    {
-        apiKey.LastUsedAt = DateTime.UtcNow;
-        apiKey.UsageCount++;
-        await db.SaveChangesAsync();
-        return Results.Ok(true);
-    }
-    return Results.BadRequest("Invalid or revoked key");
-});
-
-// Revoke API Key Endpoint
-app.MapDelete("/api/keys/revoke/{key}", async (string key, ApiKeyDbContext db) =>
-{
-    var apiKey = await db.ApiKeys.FirstOrDefaultAsync(k => k.Key == key);
-    if (apiKey == null) return Results.NotFound("API Key not found");
-    apiKey.IsRevoked = true;
-    await db.SaveChangesAsync();
-    return Results.Ok("API Key revoked");
-});
-
+app.UseExceptionHandler("/error");
+app.MapControllers();
 app.Run();

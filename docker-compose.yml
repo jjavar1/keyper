@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  keyper-api:
+    build:
+      context: ./src/Keyper.API
+      dockerfile: Dockerfile
+    container_name: keyper-api
+    depends_on:
+      - keyper-db
+    ports:
+      - "5000:5000"
+      - "5001:5001"
+    environment:
+      - DatabaseProvider=postgresql
+      - ConnectionStrings__DefaultConnection=Host=keyper-db;Database=keyper;Username=admin;Password=securepass
+
+  keyper-db:
+    image: postgres:latest
+    container_name: keyper-db
+    restart: always
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: securepass
+      POSTGRES_DB: keyper
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
